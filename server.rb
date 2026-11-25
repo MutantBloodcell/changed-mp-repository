@@ -1,7 +1,10 @@
 require "json"
 require "digest"
+require "net/http"
+require "uri"
 require "puma"
 
+FB_URL = ENV["FIREBASE_URL"].to_s.sub(/\/+\z/, "")
 ACCOUNTS_FILE = "accounts.json"
 $accounts = File.exist?(ACCOUNTS_FILE) ? JSON.parse(File.read(ACCOUNTS_FILE)) : {}
 $sessions = {} # sid => { user:, lobby:, map:, x:, y:, dir:, spr:, idx:, badge:, seen:, last_chat:, inbox: [] }
@@ -9,13 +12,50 @@ $lobbies  = {} # id => { id:, name:, mode:, host:, host_sid:, max:, members: [],
 
 BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself)\b/i
 
-def save_accounts
+def fb_req(method, path, body = nil)
+  return nil if FB_URL.empty?
+  uri = URI.parse("#{FB_URL}/#{path}.json")
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  req = case method
+        when :get then Net::HTTP::Get.new(uri.request_uri)
+        when :put then Net::HTTP::Put.new(uri.request_uri)
+        when :patch then Net::HTTP::Patch.new(uri.request_uri)
+        end
+  req["Content-Type"] = "application/json"
+  req.body = body.to_json if body
+  res = http.request(req)
+  JSON.parse(res.body) rescue nil
+rescue
+  nil
+end
+
+def get_account(u)
+  if !FB_URL.empty?
+    fb_req(:get, "accounts/#{URI.encode_www_form_component(u)}")
+  else
+    $accounts[u]
+  end
+end
+
+def put_account(u, data)
+  $accounts[u] = data
   File.write(ACCOUNTS_FILE, JSON.pretty_generate($accounts))
+  fb_req(:put, "accounts/#{URI.encode_www_form_component(u)}", data) unless FB_URL.empty?
+end
+
+def save_progress(u, prog)
+  return if u.to_s.empty?
+  fb_req(:put, "progress/#{URI.encode_www_form_component(u)}", prog) unless FB_URL.empty?
+end
+
+def load_progress(u)
+  return nil if u.to_s.empty? || FB_URL.empty?
+  fb_req(:get, "progress/#{URI.encode_www_form_component(u)}")
 end
 
 def clean_chat(txt)
-  s = txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80]
-  s.gsub(BAD_WORDS) { |m| "*" * m.size }
+  txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80].to_s.gsub(BAD_WORDS) { |m| "*" * m.size }
 end
 
 def sanitize_badge(user, badge)
@@ -70,27 +110,32 @@ App = lambda do |env|
 
     case data["t"]
     when "register"
-      u = data["u"].to_s.strip[0, 16]; p = data["p"].to_s
+      u = data["u"].to_s.strip; p = data["p"].to_s
       if u.empty? || p.empty?
         reply = { sid: sid, t: "auth_err", msg: "Username/password required" }
       elsif u =~ BAD_WORDS
         reply = { sid: sid, t: "auth_err", msg: "Username blocked by filter" }
-      elsif $accounts.key?(u)
+      elsif get_account(u)
         reply = { sid: sid, t: "auth_err", msg: "Username already taken" }
       else
         b = (u.downcase == "admin" ? "DEV" : "NEWBIE")
-        $accounts[u] = { "hash" => Digest::SHA256.hexdigest(p), "badge" => b }
-        save_accounts
+        put_account(u, { "hash" => Digest::SHA256.hexdigest(p), "badge" => b })
         st[:user] = u; st[:badge] = b
         reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], lobbies: lobby_list_payload }
       end
     when "login"
-      u = data["u"].to_s.strip; p = data["p"].to_s; acc = $accounts[u]
+      u = data["u"].to_s.strip; p = data["p"].to_s; acc = get_account(u)
       if acc && acc["hash"] == Digest::SHA256.hexdigest(p)
         st[:user] = u; st[:badge] = sanitize_badge(u, acc["badge"])
-        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], lobbies: lobby_list_payload }
+        prog = load_progress(u)
+        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], progress: prog, lobbies: lobby_list_payload }
       else
         reply = { sid: sid, t: "auth_err", msg: "Invalid login" }
+      end
+    when "save_progress"
+      if st[:user]
+        save_progress(st[:user], { "map" => data["m"], "x" => data["x"], "y" => data["y"], "skin" => data["s"], "badge" => st[:badge], "switches" => data["sw"] })
+        reply = { sid: sid, t: "prog_saved" }
       end
     when "lobbies"
       reply = { sid: sid, t: "lobby_list", lobbies: lobby_list_payload }
@@ -162,7 +207,7 @@ App = lambda do |env|
     [200, { "Content-Type" => "application/json" }, [reply.to_json]]
   else
     prune_stale!
-    [200, { "Content-Type" => "text/plain" }, ["Changed MP Server Online | Lobbies: #{$lobbies.size} | Players: #{$sessions.size}"]]
+    [200, { "Content-Type" => "text/plain" }, ["Changed MP Server Online (Firebase: #{!FB_URL.empty?}) | Lobbies: #{$lobbies.size} | Players: #{$sessions.size}"]]
   end
 end
 
