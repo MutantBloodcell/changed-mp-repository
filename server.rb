@@ -4,11 +4,26 @@ require "puma"
 
 ACCOUNTS_FILE = "accounts.json"
 $accounts = File.exist?(ACCOUNTS_FILE) ? JSON.parse(File.read(ACCOUNTS_FILE)) : {}
-$sessions = {} # sid => { user:, lobby:, map:, x:, y:, dir:, spr:, idx:, badge:, seen:, inbox: [] }
-$lobbies  = {} # id => { id:, name:, mode:, host:, max:, members: [], switches: {} }
+$sessions = {} # sid => { user:, lobby:, map:, x:, y:, dir:, spr:, idx:, badge:, seen:, last_chat:, inbox: [] }
+$lobbies  = {} # id => { id:, name:, mode:, host:, host_sid:, max:, members: [], switches: {} }
+
+BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself)\b/i
 
 def save_accounts
   File.write(ACCOUNTS_FILE, JSON.pretty_generate($accounts))
+end
+
+def clean_chat(txt)
+  s = txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80]
+  s.gsub(BAD_WORDS) { |m| "*" * m.size }
+end
+
+def sanitize_badge(user, badge)
+  b = badge.to_s.upcase
+  is_admin = (user.to_s.downcase == "admin")
+  return "DEV" if is_admin && b == "DEV"
+  return "PLAYER" if !is_admin && (b == "DEV" || b == "ADMIN")
+  %w[PLAYER HOST VIP PURO SURVIVOR LATEX NEWBIE].include?(b) ? b : (is_admin ? "DEV" : "PLAYER")
 end
 
 def prune_stale!
@@ -49,27 +64,30 @@ App = lambda do |env|
   if env["PATH_INFO"] == "/api" && env["REQUEST_METHOD"] == "POST"
     data = JSON.parse(env["rack.input"].read) rescue {}
     sid = data["sid"] || "S#{rand(100000..999999)}"
-    st = ($sessions[sid] ||= { user: nil, lobby: nil, map: 1, x: 10, y: 10, dir: 2, spr: "", idx: 0, badge: "PLAYER", seen: Time.now.to_i, inbox: [] })
+    st = ($sessions[sid] ||= { user: nil, lobby: nil, map: 1, x: 10, y: 10, dir: 2, spr: "", idx: 0, badge: "PLAYER", seen: Time.now.to_i, last_chat: 0, inbox: [] })
     st[:seen] = Time.now.to_i
     reply = { sid: sid }
 
     case data["t"]
     when "register"
-      u = data["u"].to_s.strip; p = data["p"].to_s
+      u = data["u"].to_s.strip[0, 16]; p = data["p"].to_s
       if u.empty? || p.empty?
         reply = { sid: sid, t: "auth_err", msg: "Username/password required" }
+      elsif u =~ BAD_WORDS
+        reply = { sid: sid, t: "auth_err", msg: "Username blocked by filter" }
       elsif $accounts.key?(u)
         reply = { sid: sid, t: "auth_err", msg: "Username already taken" }
       else
-        $accounts[u] = { "hash" => Digest::SHA256.hexdigest(p), "badge" => "NEWBIE" }
+        b = (u.downcase == "admin" ? "DEV" : "NEWBIE")
+        $accounts[u] = { "hash" => Digest::SHA256.hexdigest(p), "badge" => b }
         save_accounts
-        st[:user] = u; st[:badge] = "NEWBIE"
+        st[:user] = u; st[:badge] = b
         reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], lobbies: lobby_list_payload }
       end
     when "login"
       u = data["u"].to_s.strip; p = data["p"].to_s; acc = $accounts[u]
       if acc && acc["hash"] == Digest::SHA256.hexdigest(p)
-        st[:user] = u; st[:badge] = acc["badge"] || "PLAYER"
+        st[:user] = u; st[:badge] = sanitize_badge(u, acc["badge"])
         reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], lobbies: lobby_list_payload }
       else
         reply = { sid: sid, t: "auth_err", msg: "Invalid login" }
@@ -79,9 +97,10 @@ App = lambda do |env|
     when "create_lobby"
       leave_lobby(sid)
       lid = "L#{rand(1000..9999)}"
-      st[:badge] = "HOST" if st[:badge] == "PLAYER" || st[:badge] == "NEWBIE"
+      st[:badge] = sanitize_badge(st[:user], st[:user].to_s.downcase == "admin" ? "DEV" : "HOST")
+      rname = clean_chat(data["name"].to_s)
       $lobbies[lid] = {
-        id: lid, name: data["name"].to_s.empty? ? "#{st[:user]}'s Room" : data["name"],
+        id: lid, name: rname.empty? ? "#{st[:user]}'s Room" : rname,
         mode: data["mode"] || "Co-Op Story", host: st[:user], host_sid: sid, max: 8, members: [sid], switches: {}
       }
       st[:lobby] = lid
@@ -93,15 +112,27 @@ App = lambda do |env|
         lb[:members] << sid unless lb[:members].include?(sid)
         st[:lobby] = lb[:id]
         reply = { sid: sid, t: "joined_lobby", lobby: lb.slice(:id, :name, :mode, :host), switches: lb[:switches] }
+        lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{st[:user]} joined the room." } if $sessions[msid] }
       else
         reply = { sid: sid, t: "lobby_err", msg: "Lobby closed or not found" }
       end
     when "leave_lobby"
       leave_lobby(sid)
       reply = { sid: sid, t: "lobby_list", lobbies: lobby_list_payload }
+    when "kick"
+      lb = $lobbies[st[:lobby]]
+      if lb && (st[:user].to_s.downcase == "admin" || lb[:host_sid] == sid)
+        target_u = data["target"].to_s
+        tsid = lb[:members].find { |msid| $sessions[msid] && $sessions[msid][:user] == target_u && msid != sid }
+        if tsid
+          $sessions[tsid][:inbox] << { t: "kicked", by: st[:user] }
+          leave_lobby(tsid)
+          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{target_u} was kicked by #{st[:user]}." } if $sessions[msid] }
+        end
+      end
     when "sync"
       st.merge!(map: data["m"], x: data["x"], y: data["y"], dir: data["d"], spr: data["s"], idx: data["i"]) if data["m"]
-      st[:badge] = data["b"] if data["b"] && !data["b"].to_s.empty?
+      st[:badge] = sanitize_badge(st[:user], data["b"]) if data["b"]
       lb = $lobbies[st[:lobby]]
       if lb
         lb[:members].each do |msid|
@@ -112,7 +143,14 @@ App = lambda do |env|
       reply = { sid: sid, msgs: st[:inbox].slice!(0, 50) }
     when "chat"
       lb = $lobbies[st[:lobby]]
-      lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[#{st[:badge]}] #{st[:user]}", msg: data["msg"] } if $sessions[msid] } if lb
+      now = Time.now.to_f
+      if lb && now - st[:last_chat].to_f >= 0.8
+        st[:last_chat] = now
+        msg = clean_chat(data["msg"])
+        unless msg.empty?
+          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[#{st[:badge]}] #{st[:user]}", msg: msg } if $sessions[msid] }
+        end
+      end
     when "sw"
       lb = $lobbies[st[:lobby]]
       if lb
