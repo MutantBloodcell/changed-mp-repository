@@ -285,6 +285,40 @@ def cleanup_empty_lobbies(counts)
 end
 
 
+def active_ban_for(username)
+  u = username.to_s.strip.upcase
+  return nil if u.empty? || u == "MUTANTBLOODCELL"
+  b = fb_get("bans/#{u}")
+  return nil unless b.is_a?(Hash)
+  perm = (b["permanent"] == true || b["until"].to_i == 0)
+  until_ts = b["until"].to_i
+  if !perm && Time.now.to_i >= until_ts
+    fb_delete("bans/#{u}")
+    return nil
+  end
+  {
+    "banned"    => true,
+    "username"  => u,
+    "permanent" => perm,
+    "until"     => until_ts,
+    "remaining" => perm ? -1 : [until_ts - Time.now.to_i, 0].max,
+    "reason"    => (b["reason"].to_s.empty? ? "Violation of server rules" : b["reason"].to_s),
+    "by"        => b["by"].to_s
+  }
+end
+
+def ban_payload_json(ban)
+  {
+    "error"     => "ACCOUNT_BANNED",
+    "banned"    => true,
+    "permanent" => ban["permanent"],
+    "until"     => ban["until"],
+    "remaining" => ban["remaining"],
+    "reason"    => ban["reason"],
+    "by"        => ban["by"]
+  }.to_json
+end
+
 def verify_token(uname, tok)
   u = uname.to_s.upcase.strip
   t = tok.to_s.strip
@@ -356,4 +390,81 @@ post "/api/admin/delete_lobby" do
   lid = data["lobby"].to_s
   $lobbies.delete(lid) unless %w[global-main-1 global-rp-2].include?(lid)
   { status: "ok" }.to_json
+end
+
+get "/api/ban_status" do
+  content_type :json
+  u = params["username"].to_s.strip.upcase
+  ban = active_ban_for(u)
+  if ban
+    ban.to_json
+  else
+    { "banned" => false }.to_json
+  end
+end
+
+post "/api/admin/ban" do
+  content_type :json
+  data = JSON.parse(request.body.read) rescue {}
+  actor = data["username"].to_s.strip.upcase
+  halt 403, { error: "Invalid token" }.to_json unless verify_token(actor, data["token"])
+  actor_role = get_user_role(actor)
+  halt 403, { error: "Admin or Dev only" }.to_json unless %w[dev admin].include?(actor_role)
+
+  target = data["target"].to_s.strip.upcase
+  halt 400, { error: "Invalid target" }.to_json if target.empty? || target == "MUTANTBLOODCELL"
+  target_role = get_user_role(target)
+  if target_role == "admin" && actor_role != "dev"
+    halt 403, { error: "Only DEV can ban an ADMIN" }.to_json
+  end
+
+  unit   = data["unit"].to_s.downcase # "hours", "days", "permanent"
+  amount = [data["amount"].to_i, 1].max
+  reason = data["reason"].to_s.strip[0, 120]
+  reason = "Violation of server rules" if reason.empty?
+
+  now = Time.now.to_i
+  if unit == "permanent" || unit == "perm"
+    perm = true
+    until_ts = 0
+  elsif unit == "days"
+    perm = false
+    until_ts = now + (amount * 86400)
+  else
+    perm = false
+    until_ts = now + (amount * 3600)
+  end
+
+  ban_obj = {
+    "permanent" => perm,
+    "until"     => until_ts,
+    "reason"    => reason,
+    "by"        => actor,
+    "created"   => now
+  }
+  fb_put("bans/#{target}", ban_obj)
+
+  # Kick target out of all active lobbies immediately
+  all_p = fb_get("players")
+  if all_p.is_a?(Hash)
+    all_p.each_key do |lid|
+      fb_delete("players/#{lid}/#{target}")
+    end
+  end
+
+  { "ok" => true, "target" => target, "permanent" => perm, "until" => until_ts }.to_json
+end
+
+post "/api/admin/unban" do
+  content_type :json
+  data = JSON.parse(request.body.read) rescue {}
+  actor = data["username"].to_s.strip.upcase
+  halt 403, { error: "Invalid token" }.to_json unless verify_token(actor, data["token"])
+  actor_role = get_user_role(actor)
+  halt 403, { error: "Admin or Dev only" }.to_json unless %w[dev admin].include?(actor_role)
+
+  target = data["target"].to_s.strip.upcase
+  halt 400, { error: "Invalid target" }.to_json if target.empty?
+  fb_delete("bans/#{target}")
+  { "ok" => true, "target" => target }.to_json
 end
