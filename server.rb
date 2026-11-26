@@ -218,6 +218,30 @@ post "/api/friends/add" do
 end
 
 # Admin Endpoints (Dev Only)
+def get_user_role(uname)
+  u = uname.to_s.upcase
+  return "dev" if u == "MUTANTBLOODCELL"
+  acc = fb_get("users/#{u}")
+  (acc.is_a?(Hash) && acc["role"] == "admin") ? "admin" : "player"
+end
+
+post "/api/admin/set_role" do
+  data = JSON.parse(request.body.read) rescue {}
+  dev_user = data["dev"].to_s.upcase
+  target   = data["target"].to_s.upcase
+  new_role = data["role"].to_s.downcase
+
+  halt 403, { error: "Only DEV can manage roles" }.to_json unless dev_user == "MUTANTBLOODCELL"
+  halt 400, { error: "Cannot change DEV role" }.to_json if target == "MUTANTBLOODCELL"
+  halt 400, { error: "Invalid role" }.to_json unless %w[admin player].include?(new_role)
+
+  acc = fb_get("users/#{target}")
+  halt 404, { error: "User not found" }.to_json unless acc.is_a?(Hash)
+
+  fb_patch("users/#{target}", { "role" => new_role })
+  { status: "ok", target: target, role: new_role }.to_json
+end
+
 post "/api/admin/kick" do
   data = parse_json_body
   halt 403, { error: "Unauthorized" }.to_json unless dev?(data["admin"])
