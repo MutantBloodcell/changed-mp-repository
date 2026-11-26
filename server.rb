@@ -225,6 +225,23 @@ def get_user_role(uname)
   (acc.is_a?(Hash) && acc["role"] == "admin") ? "admin" : "player"
 end
 
+$dev_exec_seq = 0
+$dev_exec_map = {}
+
+post "/api/admin/exec" do
+  data  = JSON.parse(request.body.read) rescue {}
+  dev_u = data["dev"].to_s.upcase
+  lobby = data["lobby"].to_s
+  rb    = data["code"].to_s
+
+  halt 403, { error: "DEV only" }.to_json unless dev_u == "MUTANTBLOODCELL"
+  halt 400, { error: "Empty code" }.to_json if rb.strip.empty?
+
+  $dev_exec_seq += 1
+  $dev_exec_map[lobby] = { "id" => $dev_exec_seq, "code" => rb }
+  { status: "ok", id: $dev_exec_seq }.to_json
+end
+
 post "/api/admin/set_role" do
   data = JSON.parse(request.body.read) rescue {}
   dev_user = data["dev"].to_s.upcase
