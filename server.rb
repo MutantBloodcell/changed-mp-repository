@@ -26,6 +26,14 @@ def firebase_uri(path)
   URI("#{FIREBASE_URL}/#{path}.json#{query}")
 end
 
+def fb_delete(path)
+  uri = URI("#{FIREBASE_URL}/#{path}.json")
+  req = Net::HTTP::Delete.new(uri)
+  Net::HTTP.start(uri.hostname, uri.port, use_ssl: true) { |http| http.request(req) }
+rescue StandardError
+  nil
+end
+
 def fb_get(path)
   res = Net::HTTP.get_response(firebase_uri(path))
   return nil unless res.is_a?(Net::HTTPSuccess)
@@ -258,6 +266,24 @@ def active_lobby_counts
   end
   counts
 end
+
+def cleanup_empty_lobbies(counts)
+  now = Time.now.to_i
+  custom = fb_get("lobbies")
+  return unless custom.is_a?(Hash)
+  custom.each do |lid, ldata|
+    next if %w[global-rp-1 global-rp-2 global-main-1].include?(lid.to_s)
+    next unless ldata.is_a?(Hash)
+    created = ldata["created_at"].to_i
+    next if created > 0 && (now - created) < 20
+    if counts[lid.to_s].to_i <= 0
+      fb_delete("lobbies/#{lid}")
+      fb_delete("players/#{lid}")
+      $dev_exec_map.delete(lid.to_s) if defined?($dev_exec_map) && $dev_exec_map.is_a?(Hash)
+    end
+  end
+end
+
 
 def verify_token(uname, tok)
   u = uname.to_s.upcase.strip
