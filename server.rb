@@ -7,12 +7,17 @@ require "puma"
 FB_URL = ENV["FIREBASE_URL"].to_s.sub(/\/+\z/, "")
 ACCOUNTS_FILE = "accounts.json"
 BANS_FILE     = "bans.json"
-$accounts = File.exist?(ACCOUNTS_FILE) ? JSON.parse(File.read(ACCOUNTS_FILE)) : {}
-$bans     = File.exist?(BANS_FILE)     ? JSON.parse(File.read(BANS_FILE))     : {}
+FRIENDS_FILE  = "friends.json"
+PROGRESS_FILE = "progress.json"
+
+$accounts = File.exist?(ACCOUNTS_FILE) ? (JSON.parse(File.read(ACCOUNTS_FILE)) rescue {}) : {}
+$bans     = File.exist?(BANS_FILE)     ? (JSON.parse(File.read(BANS_FILE))     rescue {}) : {}
+$friends  = File.exist?(FRIENDS_FILE)  ? (JSON.parse(File.read(FRIENDS_FILE))  rescue {}) : {}
+$progress = File.exist?(PROGRESS_FILE) ? (JSON.parse(File.read(PROGRESS_FILE)) rescue {}) : {}
 $sessions = {}
 $lobbies  = {}
 
-BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself|wtf|motherfucker)\b/i
+BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself)\b/i
 
 def fb_req(method, path, body = nil)
   return nil if FB_URL.empty?
@@ -20,8 +25,8 @@ def fb_req(method, path, body = nil)
   http = Net::HTTP.new(uri.host, uri.port)
   http.use_ssl = true
   req = case method
-        when :get then Net::HTTP::Get.new(uri.request_uri)
-        when :put then Net::HTTP::Put.new(uri.request_uri)
+        when :get    then Net::HTTP::Get.new(uri.request_uri)
+        when :put    then Net::HTTP::Put.new(uri.request_uri)
         when :delete then Net::HTTP::Delete.new(uri.request_uri)
         end
   req["Content-Type"] = "application/json"
@@ -32,12 +37,17 @@ rescue
 end
 
 def get_account(u)
-  !FB_URL.empty? ? fb_req(:get, "accounts/#{URI.encode_www_form_component(u)}") : $accounts[u]
+  return nil if u.to_s.empty?
+  if !FB_URL.empty?
+    res = fb_req(:get, "accounts/#{URI.encode_www_form_component(u)}")
+    return res if res.is_a?(Hash)
+  end
+  $accounts[u]
 end
 
 def put_account(u, data)
   $accounts[u] = data
-  File.write(ACCOUNTS_FILE, JSON.pretty_generate($accounts))
+  File.write(ACCOUNTS_FILE, JSON.pretty_generate($accounts)) rescue nil
   fb_req(:put, "accounts/#{URI.encode_www_form_component(u)}", data) unless FB_URL.empty?
 end
 
@@ -55,6 +65,7 @@ def sanitize_badge(user, badge)
   return "PLAYER" if !adm && (b == "DEV" || b == "ADMIN")
   %w[PLAYER HOST VIP PURO SURVIVOR LATEX NEWBIE].include?(b) ? b : (adm ? "ADMIN" : "PLAYER")
 end
+
 def format_remaining(s)
   return "0m" if s <= 0
   d = s / 86400; h = (s % 86400) / 3600; m = (s % 3600) / 60
@@ -67,11 +78,12 @@ def check_ban(u)
   return nil if u.to_s.empty? || u.to_s.downcase == "admin"
   key = u.to_s.downcase
   b = !FB_URL.empty? ? fb_req(:get, "bans/#{URI.encode_www_form_component(key)}") : $bans[key]
+  b = $bans[key] unless b.is_a?(Hash)
   return nil unless b.is_a?(Hash)
   exp = b["until"].to_i
   if exp > 0 && Time.now.to_i >= exp
     $bans.delete(key)
-    File.write(BANS_FILE, JSON.pretty_generate($bans))
+    File.write(BANS_FILE, JSON.pretty_generate($bans)) rescue nil
     fb_req(:delete, "bans/#{URI.encode_www_form_component(key)}") unless FB_URL.empty?
     return nil
   end
@@ -85,34 +97,41 @@ def apply_ban(target_u, sec, reason, by_u)
   exp = sec.to_i <= 0 ? 0 : (Time.now.to_i + sec.to_i)
   rec = { "user" => target_u, "until" => exp, "reason" => reason.to_s, "by" => by_u.to_s }
   $bans[key] = rec
-  File.write(BANS_FILE, JSON.pretty_generate($bans))
+  File.write(BANS_FILE, JSON.pretty_generate($bans)) rescue nil
   fb_req(:put, "bans/#{URI.encode_www_form_component(key)}", rec) unless FB_URL.empty?
   rec
 end
-
 def save_progress(u, prog)
-  return if u.to_s.empty? || FB_URL.empty?
-  fb_req(:put, "progress/#{URI.encode_www_form_component(u)}", prog)
+  return if u.to_s.empty?
+  $progress[u] = prog
+  File.write(PROGRESS_FILE, JSON.pretty_generate($progress)) rescue nil
+  fb_req(:put, "progress/#{URI.encode_www_form_component(u)}", prog) unless FB_URL.empty?
 end
 
 def load_progress(u)
-  return nil if u.to_s.empty? || FB_URL.empty?
-  fb_req(:get, "progress/#{URI.encode_www_form_component(u)}")
+  return nil if u.to_s.empty?
+  if !FB_URL.empty?
+    res = fb_req(:get, "progress/#{URI.encode_www_form_component(u)}")
+    return res if res.is_a?(Hash)
+  end
+  $progress[u]
 end
 
 def get_friends(u)
   key = URI.encode_www_form_component(u.to_s)
-  data = !FB_URL.empty? ? fb_req(:get, "friends/#{key}") : nil
+  data = !FB_URL.empty? ? fb_req(:get, "friends/#{key}") : $friends[u]
+  data = $friends[u] unless data.is_a?(Hash)
   data.is_a?(Hash) ? data : { "list" => [], "reqs" => [] }
 end
 
 def put_friends(u, data)
-  key = URI.encode_www_form_component(u.to_s)
-  fb_req(:put, "friends/#{key}", data) unless FB_URL.empty?
+  $friends[u] = data
+  File.write(FRIENDS_FILE, JSON.pretty_generate($friends)) rescue nil
+  fb_req(:put, "friends/#{URI.encode_www_form_component(u.to_s)}", data) unless FB_URL.empty?
 end
 
 def clean_chat(txt)
-  txt.to_s.gsub(/[\r\n\t]+/, " ").strip.to_s.gsub(BAD_WORDS) { |m| "*" * m.size }
+  txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80].to_s.gsub(BAD_WORDS) { |m| "*" * m.size }
 end
 
 def prune_stale!
@@ -185,12 +204,7 @@ App = lambda do |env|
       end
     when "save_progress"
       if st[:user]
-        save_progress(st[:user], {
-          "map" => data["m"], "x" => data["x"], "y" => data["y"], "d" => data["d"],
-          "skin" => data["s"], "badge" => st[:badge],
-          "switches" => data["sw"], "variables" => data["vars"], "items" => data["items"],
-          "saved_at" => Time.now.to_i
-        })
+        save_progress(st[:user], { "map" => data["m"], "x" => data["x"], "y" => data["y"], "d" => data["d"], "skin" => data["s"], "badge" => st[:badge], "switches" => data["sw"], "variables" => data["vars"], "items" => data["items"], "saved_at" => Time.now.to_i })
         reply = { sid: sid, t: "prog_saved" }
       end
     when "lobbies"
@@ -200,7 +214,7 @@ App = lambda do |env|
       lid = "L#{rand(1000..9999)}"
       st[:badge] = sanitize_badge(st[:user], is_admin_user?(st[:user]) ? st[:badge] : "HOST")
       rname = clean_chat(data["name"].to_s)
-      $lobbies[lid] = { id: lid, name: rname.empty? ? "#{st[:user]}'s Room" : rname, mode: data["mode"] || "Co-Op Story", host: st[:user], host_sid: sid, max: 8, members: [sid], switches: {} }
+      $lobbies[lid] = { id: lid, name: rname.empty? ? "#{st[:user]}'s Room" : rname, mode: data["mode"] || "Co-Op Story", host: st[:user], host_sid: sid, max: 8, members: [sid], switches: {}, scores: Hash.new(0) }
       st[:lobby] = lid
       reply = { sid: sid, t: "joined_lobby", lobby: $lobbies[lid].slice(:id, :name, :mode, :host) }
     when "join_lobby"
@@ -270,14 +284,12 @@ App = lambda do |env|
     when "server_info"
       prune_stale!
       reply = { sid: sid, t: "server_info", players: $sessions.size, lobbies: $lobbies.size, accounts: $accounts.size, bans: $bans.size, firebase: !FB_URL.empty? }
-        when "friend_add"
+    when "friend_add"
       tgt = data["target"].to_s.strip
       if st[:user] && !tgt.empty? && tgt.downcase != st[:user].downcase && get_account(tgt)
-        tf = get_friends(tgt)
-        tf["reqs"] ||= []; tf["list"] ||= []
+        tf = get_friends(tgt); tf["reqs"] ||= []; tf["list"] ||= []
         if !tf["list"].include?(st[:user]) && !tf["reqs"].include?(st[:user])
-          tf["reqs"] << st[:user]
-          put_friends(tgt, tf)
+          tf["reqs"] << st[:user]; put_friends(tgt, tf)
           $sessions.each_value { |mst| mst[:inbox] << { t: "chat", user: "[FRIEND]", msg: "#{st[:user]} sent you a friend request!" } if mst[:user].to_s.downcase == tgt.downcase }
         end
         reply = { sid: sid, t: "friend_ok", msg: "Request sent to #{tgt}" }
@@ -300,10 +312,7 @@ App = lambda do |env|
         mf = get_friends(st[:user])
         online_map = {}
         $sessions.each_value { |mst| online_map[mst[:user]] = mst[:lobby] if mst[:user] }
-        flist = (mf["list"] || []).map do |fu|
-          lid = online_map[fu]
-          { "u" => fu, "online" => online_map.key?(fu), "lobby" => lid }
-        end
+        flist = (mf["list"] || []).map { |fu| { "u" => fu, "online" => online_map.key?(fu), "lobby" => online_map[fu] } }
         reply = { sid: sid, t: "friends_data", friends: flist, reqs: (mf["reqs"] || []) }
       end
     when "pvp_tag"
@@ -315,9 +324,7 @@ App = lambda do |env|
           lb[:scores] ||= Hash.new(0)
           lb[:scores][st[:user]] = lb[:scores][st[:user]].to_i + 1
           $sessions[tsid][:inbox] << { t: "tagged", by: st[:user], score: lb[:scores][st[:user]] }
-          lb[:members].each do |msid|
-            $sessions[msid][:inbox] << { t: "chat", user: "[PVP]", msg: "#{st[:user]} transfurred #{tgt}! (Tags: #{lb[:scores][st[:user]]})" } if $sessions[msid]
-          end
+          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[PVP]", msg: "#{st[:user]} transfurred #{tgt}! (Tags: #{lb[:scores][st[:user]]})" } if $sessions[msid] }
         end
       end
     when "sync"
@@ -353,5 +360,6 @@ App = lambda do |env|
     [200, { "Content-Type" => "text/plain" }, ["Changed MP Server Online (Firebase: #{!FB_URL.empty?}) | Lobbies: #{$lobbies.size} | Players: #{$sessions.size}"]]
   end
 end
+
 port = (ENV["PORT"] || 3000).to_i
 Puma::Server.new(App).tap { |s| s.add_tcp_listener("0.0.0.0", port) }.run.join
