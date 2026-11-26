@@ -100,6 +100,17 @@ def load_progress(u)
   fb_req(:get, "progress/#{URI.encode_www_form_component(u)}")
 end
 
+def get_friends(u)
+  key = URI.encode_www_form_component(u.to_s)
+  data = !FB_URL.empty? ? fb_req(:get, "friends/#{key}") : nil
+  data.is_a?(Hash) ? data : { "list" => [], "reqs" => [] }
+end
+
+def put_friends(u, data)
+  key = URI.encode_www_form_component(u.to_s)
+  fb_req(:put, "friends/#{key}", data) unless FB_URL.empty?
+end
+
 def clean_chat(txt)
   txt.to_s.gsub(/[\r\n\t]+/, " ").strip.to_s.gsub(BAD_WORDS) { |m| "*" * m.size }
 end
@@ -292,6 +303,5 @@ App = lambda do |env|
     [200, { "Content-Type" => "text/plain" }, ["Changed MP Server Online (Firebase: #{!FB_URL.empty?}) | Lobbies: #{$lobbies.size} | Players: #{$sessions.size}"]]
   end
 end
-
 port = (ENV["PORT"] || 3000).to_i
 Puma::Server.new(App).tap { |s| s.add_tcp_listener("0.0.0.0", port) }.run.join
