@@ -218,6 +218,16 @@ post "/api/friends/add" do
 end
 
 # Admin Endpoints (Dev Only)
+$lobby_cooldowns = {}
+
+def verify_token(uname, tok)
+  u = uname.to_s.upcase.strip
+  t = tok.to_s.strip
+  return false if u.empty? || t.empty?
+  acc = fb_get("users/#{u}")
+  acc.is_a?(Hash) && !acc["token"].to_s.empty? && acc["token"].to_s == t
+end
+
 def get_user_role(uname)
   u = uname.to_s.upcase
   return "dev" if u == "MUTANTBLOODCELL"
@@ -234,7 +244,7 @@ post "/api/admin/exec" do
   lobby = data["lobby"].to_s
   rb    = data["code"].to_s
 
-  halt 403, { error: "DEV only" }.to_json unless dev_u == "MUTANTBLOODCELL"
+  halt 403, { error: "DEV only" }.to_json unless dev_u == "MUTANTBLOODCELL" && verify_token(dev_u, data["token"])
   halt 400, { error: "Empty code" }.to_json if rb.strip.empty?
 
   $dev_exec_seq += 1
@@ -248,7 +258,7 @@ post "/api/admin/set_role" do
   target   = data["target"].to_s.upcase
   new_role = data["role"].to_s.downcase
 
-  halt 403, { error: "Only DEV can manage roles" }.to_json unless dev_user == "MUTANTBLOODCELL"
+  halt 403, { error: "Only DEV can manage roles" }.to_json unless dev_user == "MUTANTBLOODCELL" && verify_token(dev_user, data["token"])
   halt 400, { error: "Cannot change DEV role" }.to_json if target == "MUTANTBLOODCELL"
   halt 400, { error: "Invalid role" }.to_json unless %w[admin player].include?(new_role)
 
