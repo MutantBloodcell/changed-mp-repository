@@ -41,6 +41,20 @@ def put_account(u, data)
   fb_req(:put, "accounts/#{URI.encode_www_form_component(u)}", data) unless FB_URL.empty?
 end
 
+def is_admin_user?(u)
+  return false if u.to_s.empty?
+  return true if u.to_s.downcase == "admin"
+  acc = get_account(u)
+  acc.is_a?(Hash) && acc["admin"] == true
+end
+
+def sanitize_badge(user, badge)
+  b = badge.to_s.upcase
+  adm = is_admin_user?(user)
+  return b if adm && (b == "DEV" || b == "ADMIN")
+  return "PLAYER" if !adm && (b == "DEV" || b == "ADMIN")
+  %w[PLAYER HOST VIP PURO SURVIVOR LATEX NEWBIE].include?(b) ? b : (adm ? "ADMIN" : "PLAYER")
+end
 def format_remaining(s)
   return "0m" if s <= 0
   d = s / 86400; h = (s % 86400) / 3600; m = (s % 3600) / 60
@@ -75,6 +89,7 @@ def apply_ban(target_u, sec, reason, by_u)
   fb_req(:put, "bans/#{URI.encode_www_form_component(key)}", rec) unless FB_URL.empty?
   rec
 end
+
 def save_progress(u, prog)
   return if u.to_s.empty? || FB_URL.empty?
   fb_req(:put, "progress/#{URI.encode_www_form_component(u)}", prog)
@@ -86,16 +101,7 @@ def load_progress(u)
 end
 
 def clean_chat(txt)
-  s = txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80].to_s
-  s.gsub(BAD_WORDS) { |m| "*" * m.size }
-end
-
-def sanitize_badge(user, badge)
-  b = badge.to_s.upcase
-  is_admin = (user.to_s.downcase == "admin")
-  return "DEV" if is_admin && b == "DEV"
-  return "PLAYER" if !is_admin && (b == "DEV" || b == "ADMIN")
-  %w[PLAYER HOST VIP PURO SURVIVOR LATEX NEWBIE].include?(b) ? b : (is_admin ? "DEV" : "PLAYER")
+  txt.to_s.gsub(/[\r\n\t]+/, " ").strip.to_s.gsub(BAD_WORDS) { |m| "*" * m.size }
 end
 
 def prune_stale!
@@ -152,9 +158,9 @@ App = lambda do |env|
         reply = { sid: sid, t: "auth_err", msg: "Username already taken" }
       else
         b = (u.downcase == "admin" ? "DEV" : "NEWBIE")
-        put_account(u, { "hash" => Digest::SHA256.hexdigest(p), "badge" => b })
+        put_account(u, { "hash" => Digest::SHA256.hexdigest(p), "badge" => b, "admin" => (u.downcase == "admin") })
         st[:user] = u; st[:badge] = b
-        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], lobbies: lobby_list_payload }
+        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], is_admin: is_admin_user?(u), lobbies: lobby_list_payload }
       end
     when "login"
       u = data["u"].to_s.strip; p = data["p"].to_s; acc = get_account(u)
@@ -162,7 +168,7 @@ App = lambda do |env|
         reply = { sid: sid, t: "banned", ban: ban }
       elsif acc && acc["hash"] == Digest::SHA256.hexdigest(p)
         st[:user] = u; st[:badge] = sanitize_badge(u, acc["badge"])
-        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], progress: load_progress(u), lobbies: lobby_list_payload }
+        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], is_admin: is_admin_user?(u), progress: load_progress(u), lobbies: lobby_list_payload }
       else
         reply = { sid: sid, t: "auth_err", msg: "Invalid login" }
       end
@@ -176,7 +182,7 @@ App = lambda do |env|
     when "create_lobby"
       leave_lobby(sid)
       lid = "L#{rand(1000..9999)}"
-      st[:badge] = sanitize_badge(st[:user], st[:user].to_s.downcase == "admin" ? "DEV" : "HOST")
+      st[:badge] = sanitize_badge(st[:user], is_admin_user?(st[:user]) ? st[:badge] : "HOST")
       rname = clean_chat(data["name"].to_s)
       $lobbies[lid] = { id: lid, name: rname.empty? ? "#{st[:user]}'s Room" : rname, mode: data["mode"] || "Co-Op Story", host: st[:user], host_sid: sid, max: 8, members: [sid], switches: {} }
       st[:lobby] = lid
@@ -197,7 +203,7 @@ App = lambda do |env|
       reply = { sid: sid, t: "lobby_list", lobbies: lobby_list_payload }
     when "kick"
       lb = $lobbies[st[:lobby]]
-      if lb && (st[:user].to_s.downcase == "admin" || lb[:host_sid] == sid)
+      if lb && (is_admin_user?(st[:user]) || lb[:host_sid] == sid)
         tgt = data["target"].to_s
         tsid = lb[:members].find { |msid| $sessions[msid] && $sessions[msid][:user] == tgt && msid != sid }
         if tsid
@@ -207,9 +213,9 @@ App = lambda do |env|
         end
       end
     when "ban"
-      if st[:user].to_s.downcase == "admin"
+      if is_admin_user?(st[:user])
         tgt = data["target"].to_s
-        apply_ban(tgt, data["sec"].to_i, data["reason"].to_s.empty? ? "Banned by Admin" : data["reason"].to_s, st[:user])
+        apply_ban(tgt, data["sec"].to_i, data["reason"].to_s.empty? ? "Banned by #{st[:user]}" : data["reason"].to_s, st[:user])
         binfo = check_ban(tgt)
         $sessions.each do |msid, mst|
           if mst[:user].to_s.downcase == tgt.downcase
@@ -220,6 +226,34 @@ App = lambda do |env|
         lb = $lobbies[st[:lobby]]
         lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{tgt} was BANNED (#{binfo['remaining']}) by #{st[:user]}!" } if $sessions[msid] } if lb
       end
+    when "promote"
+      if st[:user].to_s.downcase == "admin"
+        tgt = data["target"].to_s; acc = get_account(tgt)
+        if acc
+          acc["admin"] = true; acc["badge"] = "ADMIN"; put_account(tgt, acc)
+          $sessions.each_value { |mst| (mst[:badge] = "ADMIN"; mst[:inbox] << { t: "promoted", admin: true, badge: "ADMIN" }) if mst[:user].to_s.downcase == tgt.downcase }
+          lb = $lobbies[st[:lobby]]
+          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{tgt} was PROMOTED to Admin!" } if $sessions[msid] } if lb
+        end
+      end
+    when "demote"
+      if st[:user].to_s.downcase == "admin"
+        tgt = data["target"].to_s; acc = get_account(tgt)
+        if acc && tgt.downcase != "admin"
+          acc["admin"] = false; acc["badge"] = "PLAYER"; put_account(tgt, acc)
+          $sessions.each_value { |mst| (mst[:badge] = "PLAYER"; mst[:inbox] << { t: "promoted", admin: false, badge: "PLAYER" }) if mst[:user].to_s.downcase == tgt.downcase }
+          lb = $lobbies[st[:lobby]]
+          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{tgt} was demoted from Admin." } if $sessions[msid] } if lb
+        end
+      end
+    when "announce"
+      if is_admin_user?(st[:user])
+        msg = clean_chat(data["msg"])
+        $sessions.each_value { |mst| mst[:inbox] << { t: "announce", user: st[:user], msg: msg } } unless msg.empty?
+      end
+    when "server_info"
+      prune_stale!
+      reply = { sid: sid, t: "server_info", players: $sessions.size, lobbies: $lobbies.size, accounts: $accounts.size, bans: $bans.size, firebase: !FB_URL.empty? }
     when "sync"
       st.merge!(map: data["m"], x: data["x"], y: data["y"], dir: data["d"], spr: data["s"], idx: data["i"]) if data["m"]
       st[:badge] = sanitize_badge(st[:user], data["b"]) if data["b"]
