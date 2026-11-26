@@ -7,16 +7,19 @@ require "digest"
 set :bind, "0.0.0.0"
 set :port, ENV.fetch("PORT", 10000)
 
-FIREBASE_URL  = ENV.fetch("FIREBASE_URL", "https://firebaseio.com").chomp("/")
+FIREBASE_URL  = ENV.fetch("FIREBASE_URL", "https://" + "changed-mp-default-rtdb" + ".firebaseio.com").chomp("/")
 FIREBASE_AUTH = ENV["FIREBASE_SECRET"]
+DEV_USERS     = %w[MUTANTBLOODCELL ADMIN DEV].freeze
 
-BANNED_WORDS   = %w[badword1 badword2 slur1].freeze
+BANNED_WORDS   = %w[fuck shit bitch asshole bastard cunt dick pussy nigger nigga faggot fag retard whore slut kys nazi hitler rape pedophile porn sex cock twat].freeze
 PLAYER_TIMEOUT = 15
 
 $lobbies = {
   "global-main-1" => { "id" => "global-main-1", "name" => "Global Main 1", "players" => {} },
   "global-rp-2"   => { "id" => "global-rp-2",   "name" => "Global RP 2",   "players" => {} }
 }
+$announcement = ""
+$kicked_users = {}
 
 def firebase_uri(path)
   query = FIREBASE_AUTH && !FIREBASE_AUTH.empty? ? "?auth=#{FIREBASE_AUTH}" : ""
@@ -53,20 +56,22 @@ end
 
 def filter_text(str)
   clean = str.to_s.dup
-  BANNED_WORDS.each do |word|
-    clean.gsub!(/#{Regexp.escape(word)}/i, "*" * word.length)
-  end
+  BANNED_WORDS.each { |w| clean.gsub!(/#{Regexp.escape(w)}/i, "*" * w.length) }
   clean.gsub(/[^a-zA-Z0-9_\-\*\!\?\.\,\' ]/, "")
 end
 
 def sanitize_username(str)
-  filter_text(str).gsub(/[^a-zA-Z0-9_\-]/, "")[0, 16]
+  filter_text(str).gsub(/[^a-zA-Z0-9_\-\.]/, "").upcase
+end
+
+def dev?(username)
+  DEV_USERS.include?(username.to_s.upcase)
 end
 
 def prune_inactive_players
   now = Time.now.to_i
   $lobbies.each_value do |lobby|
-    lobby["players"].delete_if { |_user, pdata| (now - pdata["last_seen"].to_i) > PLAYER_TIMEOUT }
+    lobby["players"].delete_if { |_u, pdata| (now - pdata["last_seen"].to_i) > PLAYER_TIMEOUT }
   end
 end
 
@@ -85,10 +90,7 @@ end
 get "/" do
   content_type :text
   prune_inactive_players
-  fb_ok = firebase_connected?
-  total_lobbies = $lobbies.size
-  total_players = $lobbies.values.sum { |l| l["players"].size }
-  "Changed MP Server Online (Firebase: #{fb_ok}) | Lobbies: #{total_lobbies} | Players: #{total_players}"
+  "Changed MP Server Online (Firebase: #{firebase_connected?}) | Lobbies: #{$lobbies.size} | Players: #{$lobbies.values.sum { |l| l["players"].size }}"
 end
 
 post "/api/register" do
@@ -102,17 +104,19 @@ post "/api/register" do
 
   pass_hash = Digest::SHA256.hexdigest("changed_mp_salt_#{password}")
   token     = Digest::SHA256.hexdigest("#{username}:#{pass_hash}:#{Time.now.to_i}")
+  role      = dev?(username) ? "dev" : "player"
 
   user_record = {
     "username"   => username,
     "pass_hash"  => pass_hash,
     "token"      => token,
+    "role"       => role,
     "created_at" => Time.now.to_i,
     "friends"    => {}
   }
 
   fb_put("users/#{username}", user_record)
-  { status: "ok", username: username, token: token }.to_json
+  { status: "ok", username: username, token: token, role: role }.to_json
 end
 
 post "/api/login" do
@@ -123,7 +127,8 @@ post "/api/login" do
 
   record = fb_get("users/#{username}")
   if record && record["pass_hash"] == pass_hash
-    { status: "ok", username: username, token: record["token"] }.to_json
+    role = dev?(username) ? "dev" : (record["role"] || "player")
+    { status: "ok", username: username, token: record["token"], role: role }.to_json
   else
     status 401
     { status: "error", error: "Invalid credentials" }.to_json
@@ -137,7 +142,8 @@ post "/api/verify" do
 
   record = fb_get("users/#{username}")
   if record && record["token"] == token
-    { status: "ok", username: username }.to_json
+    role = dev?(username) ? "dev" : (record["role"] || "player")
+    { status: "ok", username: username, role: role }.to_json
   else
     status 401
     { status: "invalid" }.to_json
@@ -146,17 +152,14 @@ end
 
 get "/api/lobbies" do
   prune_inactive_players
-  list = $lobbies.values.map do |l|
-    { "id" => l["id"], "name" => l["name"], "count" => l["players"].size }
-  end
-  { "lobbies" => list }.to_json
+  list = $lobbies.values.map { |l| { "id" => l["id"], "count" => l["players"].size } }
+  { "lobbies" => list, "announcement" => $announcement }.to_json
 end
 
 post "/api/lobbies/create" do
   data = parse_json_body
-  lobby_id = sanitize_username(data["id"])
+  lobby_id = sanitize_username(data["id"]).downcase
   lobby_id = "lobby-#{rand(1000..9999)}" if lobby_id.empty?
-
   $lobbies[lobby_id] ||= { "id" => lobby_id, "name" => lobby_id, "players" => {} }
   fb_put("lobbies/#{lobby_id}", { "id" => lobby_id, "created_at" => Time.now.to_i })
   { status: "ok", id: lobby_id }.to_json
@@ -165,28 +168,35 @@ end
 post "/api/sync" do
   prune_inactive_players
   data = parse_json_body
-
   lobby_id = data["lobby"].to_s
   username = sanitize_username(data["user"])
   halt 400, { error: "Missing fields" }.to_json if lobby_id.empty? || username.empty?
 
+  if $kicked_users.delete(username)
+    $lobbies.each_value { |l| l["players"].delete(username) }
+    halt 403, { error: "kicked" }.to_json
+  end
+
   $lobbies[lobby_id] ||= { "id" => lobby_id, "name" => lobby_id, "players" => {} }
+  role = dev?(username) ? "dev" : "player"
 
   $lobbies[lobby_id]["players"][username] = {
     "user"      => username,
+    "role"      => role,
     "map"       => data["map"].to_i,
     "x"         => data["x"].to_i,
     "y"         => data["y"].to_i,
     "dir"       => data["dir"].to_i,
     "gfx"       => data["gfx"].to_s.gsub(/[^a-zA-Z0-9_\-\$\!]/, ""),
     "idx"       => data["idx"].to_i,
-    "chat"      => filter_text(data["chat"].to_s)[0, 48],
+    "chat"      => filter_text(data["chat"].to_s),
     "last_seen" => Time.now.to_i
   }
 
   $lobbies[lobby_id]["players"].values.map do |p|
     {
       "user" => p["user"],
+      "role" => p["role"],
       "map"  => p["map"],
       "x"    => p["x"],
       "y"    => p["y"],
@@ -203,7 +213,31 @@ post "/api/friends/add" do
   user   = sanitize_username(data["user"])
   friend = sanitize_username(data["friend"])
   halt 400, { error: "Invalid names" }.to_json if user.empty? || friend.empty?
-
   fb_put("users/#{user}/friends/#{friend}", true)
   { status: "ok", friend: friend }.to_json
+end
+
+# Admin Endpoints (Dev Only)
+post "/api/admin/kick" do
+  data = parse_json_body
+  halt 403, { error: "Unauthorized" }.to_json unless dev?(data["admin"])
+  target = sanitize_username(data["target"])
+  $kicked_users[target] = true
+  $lobbies.each_value { |l| l["players"].delete(target) }
+  { status: "ok" }.to_json
+end
+
+post "/api/admin/announce" do
+  data = parse_json_body
+  halt 403, { error: "Unauthorized" }.to_json unless dev?(data["admin"])
+  $announcement = filter_text(data["message"].to_s)
+  { status: "ok" }.to_json
+end
+
+post "/api/admin/delete_lobby" do
+  data = parse_json_body
+  halt 403, { error: "Unauthorized" }.to_json unless dev?(data["admin"])
+  lid = data["lobby"].to_s
+  $lobbies.delete(lid) unless %w[global-main-1 global-rp-2].include?(lid)
+  { status: "ok" }.to_json
 end
