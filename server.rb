@@ -151,9 +151,31 @@ post "/api/verify" do
 end
 
 get "/api/lobbies" do
-  prune_inactive_players
-  list = $lobbies.values.map { |l| { "id" => l["id"], "count" => l["players"].size } }
-  { "lobbies" => list, "announcement" => $announcement }.to_json
+  content_type :json
+  counts = active_lobby_counts
+  list = [
+    { "id" => "global-rp-1", "name" => "OFFICIAL GLOBAL #1", "type" => "official" },
+    { "id" => "global-rp-2", "name" => "OFFICIAL GLOBAL #2", "type" => "official" }
+  ]
+  custom = fb_get("lobbies")
+  if custom.is_a?(Hash)
+    custom.each do |lid, ldata|
+      next unless ldata.is_a?(Hash)
+      next if %w[global-rp-1 global-rp-2].include?(lid.to_s)
+      list.push({
+        "id"    => lid.to_s,
+        "name"  => (ldata["name"] || lid).to_s,
+        "type"  => "custom",
+        "owner" => ldata["owner"].to_s
+      })
+    end
+  end
+  list.each do |item|
+    c = counts[item["id"]]
+    item["count"] = c
+    item["max"]   = MAX_PLAYERS_PER_LOBBY
+  end
+  { "lobbies" => list }.to_json
 end
 
 post "/api/lobbies/create" do
@@ -219,6 +241,23 @@ end
 
 # Admin Endpoints (Dev Only)
 $lobby_cooldowns = {}
+
+MAX_PLAYERS_PER_LOBBY = 40
+
+def active_lobby_counts
+  counts = Hash.new(0)
+  now = Time.now.to_i
+  all_p = fb_get("players")
+  if all_p.is_a?(Hash)
+    all_p.each_value do |pdata|
+      next unless pdata.is_a?(Hash)
+      if (now - pdata["ts"].to_i) <= 15 && !pdata["lobby"].to_s.empty?
+        counts[pdata["lobby"].to_s] += 1
+      end
+    end
+  end
+  counts
+end
 
 def verify_token(uname, tok)
   u = uname.to_s.upcase.strip
