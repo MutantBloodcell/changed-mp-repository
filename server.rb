@@ -6,9 +6,11 @@ require "puma"
 
 FB_URL = ENV["FIREBASE_URL"].to_s.sub(/\/+\z/, "")
 ACCOUNTS_FILE = "accounts.json"
+BANS_FILE     = "bans.json"
 $accounts = File.exist?(ACCOUNTS_FILE) ? JSON.parse(File.read(ACCOUNTS_FILE)) : {}
-$sessions = {} # sid => { user:, lobby:, map:, x:, y:, dir:, spr:, idx:, badge:, seen:, last_chat:, inbox: [] }
-$lobbies  = {} # id => { id:, name:, mode:, host:, host_sid:, max:, members: [], switches: {} }
+$bans     = File.exist?(BANS_FILE)     ? JSON.parse(File.read(BANS_FILE))     : {}
+$sessions = {}
+$lobbies  = {}
 
 BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself)\b/i
 
@@ -20,22 +22,17 @@ def fb_req(method, path, body = nil)
   req = case method
         when :get then Net::HTTP::Get.new(uri.request_uri)
         when :put then Net::HTTP::Put.new(uri.request_uri)
-        when :patch then Net::HTTP::Patch.new(uri.request_uri)
+        when :delete then Net::HTTP::Delete.new(uri.request_uri)
         end
   req["Content-Type"] = "application/json"
   req.body = body.to_json if body
-  res = http.request(req)
-  JSON.parse(res.body) rescue nil
+  JSON.parse(http.request(req).body) rescue nil
 rescue
   nil
 end
 
 def get_account(u)
-  if !FB_URL.empty?
-    fb_req(:get, "accounts/#{URI.encode_www_form_component(u)}")
-  else
-    $accounts[u]
-  end
+  !FB_URL.empty? ? fb_req(:get, "accounts/#{URI.encode_www_form_component(u)}") : $accounts[u]
 end
 
 def put_account(u, data)
@@ -44,9 +41,43 @@ def put_account(u, data)
   fb_req(:put, "accounts/#{URI.encode_www_form_component(u)}", data) unless FB_URL.empty?
 end
 
+def format_remaining(s)
+  return "0m" if s <= 0
+  d = s / 86400; h = (s % 86400) / 3600; m = (s % 3600) / 60
+  return "#{d}d #{h}h" if d > 0
+  return "#{h}h #{m}m" if h > 0
+  "#{[m, 1].max}m"
+end
+
+def check_ban(u)
+  return nil if u.to_s.empty? || u.to_s.downcase == "admin"
+  key = u.to_s.downcase
+  b = !FB_URL.empty? ? fb_req(:get, "bans/#{URI.encode_www_form_component(key)}") : $bans[key]
+  return nil unless b.is_a?(Hash)
+  exp = b["until"].to_i
+  if exp > 0 && Time.now.to_i >= exp
+    $bans.delete(key)
+    File.write(BANS_FILE, JSON.pretty_generate($bans))
+    fb_req(:delete, "bans/#{URI.encode_www_form_component(key)}") unless FB_URL.empty?
+    return nil
+  end
+  rem = exp == 0 ? "PERMANENT" : format_remaining(exp - Time.now.to_i)
+  { "reason" => (b["reason"] || "Rule violation"), "by" => (b["by"] || "Admin"), "remaining" => rem, "until" => exp }
+end
+
+def apply_ban(target_u, sec, reason, by_u)
+  return if target_u.to_s.empty? || target_u.to_s.downcase == "admin"
+  key = target_u.to_s.downcase
+  exp = sec.to_i <= 0 ? 0 : (Time.now.to_i + sec.to_i)
+  rec = { "user" => target_u, "until" => exp, "reason" => reason.to_s, "by" => by_u.to_s }
+  $bans[key] = rec
+  File.write(BANS_FILE, JSON.pretty_generate($bans))
+  fb_req(:put, "bans/#{URI.encode_www_form_component(key)}", rec) unless FB_URL.empty?
+  rec
+end
 def save_progress(u, prog)
-  return if u.to_s.empty?
-  fb_req(:put, "progress/#{URI.encode_www_form_component(u)}", prog) unless FB_URL.empty?
+  return if u.to_s.empty? || FB_URL.empty?
+  fb_req(:put, "progress/#{URI.encode_www_form_component(u)}", prog)
 end
 
 def load_progress(u)
@@ -55,7 +86,8 @@ def load_progress(u)
 end
 
 def clean_chat(txt)
-  txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80].to_s.gsub(BAD_WORDS) { |m| "*" * m.size }
+  s = txt.to_s.gsub(/[\r\n\t]+/, " ").strip[0, 80].to_s
+  s.gsub(BAD_WORDS) { |m| "*" * m.size }
 end
 
 def sanitize_badge(user, badge)
@@ -99,7 +131,6 @@ def lobby_list_payload
     { id: l[:id], name: l[:name], mode: l[:mode], count: l[:members].size, max: l[:max] }
   end
 end
-
 App = lambda do |env|
   if env["PATH_INFO"] == "/api" && env["REQUEST_METHOD"] == "POST"
     data = JSON.parse(env["rack.input"].read) rescue {}
@@ -111,7 +142,9 @@ App = lambda do |env|
     case data["t"]
     when "register"
       u = data["u"].to_s.strip; p = data["p"].to_s
-      if u.empty? || p.empty?
+      if (ban = check_ban(u))
+        reply = { sid: sid, t: "banned", ban: ban }
+      elsif u.empty? || p.empty?
         reply = { sid: sid, t: "auth_err", msg: "Username/password required" }
       elsif u =~ BAD_WORDS
         reply = { sid: sid, t: "auth_err", msg: "Username blocked by filter" }
@@ -125,10 +158,11 @@ App = lambda do |env|
       end
     when "login"
       u = data["u"].to_s.strip; p = data["p"].to_s; acc = get_account(u)
-      if acc && acc["hash"] == Digest::SHA256.hexdigest(p)
+      if (ban = check_ban(u))
+        reply = { sid: sid, t: "banned", ban: ban }
+      elsif acc && acc["hash"] == Digest::SHA256.hexdigest(p)
         st[:user] = u; st[:badge] = sanitize_badge(u, acc["badge"])
-        prog = load_progress(u)
-        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], progress: prog, lobbies: lobby_list_payload }
+        reply = { sid: sid, t: "auth_ok", user: u, badge: st[:badge], progress: load_progress(u), lobbies: lobby_list_payload }
       else
         reply = { sid: sid, t: "auth_err", msg: "Invalid login" }
       end
@@ -144,10 +178,7 @@ App = lambda do |env|
       lid = "L#{rand(1000..9999)}"
       st[:badge] = sanitize_badge(st[:user], st[:user].to_s.downcase == "admin" ? "DEV" : "HOST")
       rname = clean_chat(data["name"].to_s)
-      $lobbies[lid] = {
-        id: lid, name: rname.empty? ? "#{st[:user]}'s Room" : rname,
-        mode: data["mode"] || "Co-Op Story", host: st[:user], host_sid: sid, max: 8, members: [sid], switches: {}
-      }
+      $lobbies[lid] = { id: lid, name: rname.empty? ? "#{st[:user]}'s Room" : rname, mode: data["mode"] || "Co-Op Story", host: st[:user], host_sid: sid, max: 8, members: [sid], switches: {} }
       st[:lobby] = lid
       reply = { sid: sid, t: "joined_lobby", lobby: $lobbies[lid].slice(:id, :name, :mode, :host) }
     when "join_lobby"
@@ -167,13 +198,27 @@ App = lambda do |env|
     when "kick"
       lb = $lobbies[st[:lobby]]
       if lb && (st[:user].to_s.downcase == "admin" || lb[:host_sid] == sid)
-        target_u = data["target"].to_s
-        tsid = lb[:members].find { |msid| $sessions[msid] && $sessions[msid][:user] == target_u && msid != sid }
+        tgt = data["target"].to_s
+        tsid = lb[:members].find { |msid| $sessions[msid] && $sessions[msid][:user] == tgt && msid != sid }
         if tsid
           $sessions[tsid][:inbox] << { t: "kicked", by: st[:user] }
           leave_lobby(tsid)
-          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{target_u} was kicked by #{st[:user]}." } if $sessions[msid] }
+          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{tgt} was kicked by #{st[:user]}." } if $sessions[msid] }
         end
+      end
+    when "ban"
+      if st[:user].to_s.downcase == "admin"
+        tgt = data["target"].to_s
+        apply_ban(tgt, data["sec"].to_i, data["reason"].to_s.empty? ? "Banned by Admin" : data["reason"].to_s, st[:user])
+        binfo = check_ban(tgt)
+        $sessions.each do |msid, mst|
+          if mst[:user].to_s.downcase == tgt.downcase
+            mst[:inbox] << { t: "banned", ban: binfo }
+            leave_lobby(msid)
+          end
+        end
+        lb = $lobbies[st[:lobby]]
+        lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[SYSTEM]", msg: "#{tgt} was BANNED (#{binfo['remaining']}) by #{st[:user]}!" } if $sessions[msid] } if lb
       end
     when "sync"
       st.merge!(map: data["m"], x: data["x"], y: data["y"], dir: data["d"], spr: data["s"], idx: data["i"]) if data["m"]
@@ -192,9 +237,7 @@ App = lambda do |env|
       if lb && now - st[:last_chat].to_f >= 0.8
         st[:last_chat] = now
         msg = clean_chat(data["msg"])
-        unless msg.empty?
-          lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[#{st[:badge]}] #{st[:user]}", msg: msg } if $sessions[msid] }
-        end
+        lb[:members].each { |msid| $sessions[msid][:inbox] << { t: "chat", user: "[#{st[:badge]}] #{st[:user]}", msg: msg } if $sessions[msid] } unless msg.empty?
       end
     when "sw"
       lb = $lobbies[st[:lobby]]
