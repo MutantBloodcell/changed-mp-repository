@@ -12,7 +12,7 @@ $bans     = File.exist?(BANS_FILE)     ? JSON.parse(File.read(BANS_FILE))     : 
 $sessions = {}
 $lobbies  = {}
 
-BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself)\b/i
+BAD_WORDS = /\b(fuck|shit|bitch|cunt|nigger|nigga|faggot|retard|kys|kill yourself|wtf|motherfucker)\b/i
 
 def fb_req(method, path, body = nil)
   return nil if FB_URL.empty?
@@ -174,7 +174,12 @@ App = lambda do |env|
       end
     when "save_progress"
       if st[:user]
-        save_progress(st[:user], { "map" => data["m"], "x" => data["x"], "y" => data["y"], "skin" => data["s"], "badge" => st[:badge], "switches" => data["sw"] })
+        save_progress(st[:user], {
+          "map" => data["m"], "x" => data["x"], "y" => data["y"], "d" => data["d"],
+          "skin" => data["s"], "badge" => st[:badge],
+          "switches" => data["sw"], "variables" => data["vars"], "items" => data["items"],
+          "saved_at" => Time.now.to_i
+        })
         reply = { sid: sid, t: "prog_saved" }
       end
     when "lobbies"
