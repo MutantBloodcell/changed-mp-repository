@@ -270,6 +270,56 @@ App = lambda do |env|
     when "server_info"
       prune_stale!
       reply = { sid: sid, t: "server_info", players: $sessions.size, lobbies: $lobbies.size, accounts: $accounts.size, bans: $bans.size, firebase: !FB_URL.empty? }
+        when "friend_add"
+      tgt = data["target"].to_s.strip
+      if st[:user] && !tgt.empty? && tgt.downcase != st[:user].downcase && get_account(tgt)
+        tf = get_friends(tgt)
+        tf["reqs"] ||= []; tf["list"] ||= []
+        if !tf["list"].include?(st[:user]) && !tf["reqs"].include?(st[:user])
+          tf["reqs"] << st[:user]
+          put_friends(tgt, tf)
+          $sessions.each_value { |mst| mst[:inbox] << { t: "chat", user: "[FRIEND]", msg: "#{st[:user]} sent you a friend request!" } if mst[:user].to_s.downcase == tgt.downcase }
+        end
+        reply = { sid: sid, t: "friend_ok", msg: "Request sent to #{tgt}" }
+      else
+        reply = { sid: sid, t: "friend_err", msg: "Player not found" }
+      end
+    when "friend_accept"
+      from_u = data["target"].to_s.strip
+      if st[:user] && !from_u.empty?
+        mf = get_friends(st[:user]); tf = get_friends(from_u)
+        mf["reqs"] ||= []; mf["list"] ||= []; tf["list"] ||= []
+        mf["reqs"].delete(from_u)
+        mf["list"] << from_u unless mf["list"].include?(from_u)
+        tf["list"] << st[:user] unless tf["list"].include?(st[:user])
+        put_friends(st[:user], mf); put_friends(from_u, tf)
+        reply = { sid: sid, t: "friend_ok", msg: "You and #{from_u} are now friends!" }
+      end
+    when "friends_list"
+      if st[:user]
+        mf = get_friends(st[:user])
+        online_map = {}
+        $sessions.each_value { |mst| online_map[mst[:user]] = mst[:lobby] if mst[:user] }
+        flist = (mf["list"] || []).map do |fu|
+          lid = online_map[fu]
+          { "u" => fu, "online" => online_map.key?(fu), "lobby" => lid }
+        end
+        reply = { sid: sid, t: "friends_data", friends: flist, reqs: (mf["reqs"] || []) }
+      end
+    when "pvp_tag"
+      lb = $lobbies[st[:lobby]]
+      if lb && lb[:mode] == "PvP Tag"
+        tgt = data["target"].to_s
+        tsid = lb[:members].find { |msid| $sessions[msid] && $sessions[msid][:user] == tgt && msid != sid }
+        if tsid
+          lb[:scores] ||= Hash.new(0)
+          lb[:scores][st[:user]] = lb[:scores][st[:user]].to_i + 1
+          $sessions[tsid][:inbox] << { t: "tagged", by: st[:user], score: lb[:scores][st[:user]] }
+          lb[:members].each do |msid|
+            $sessions[msid][:inbox] << { t: "chat", user: "[PVP]", msg: "#{st[:user]} transfurred #{tgt}! (Tags: #{lb[:scores][st[:user]]})" } if $sessions[msid]
+          end
+        end
+      end
     when "sync"
       st.merge!(map: data["m"], x: data["x"], y: data["y"], dir: data["d"], spr: data["s"], idx: data["i"]) if data["m"]
       st[:badge] = sanitize_badge(st[:user], data["b"]) if data["b"]
