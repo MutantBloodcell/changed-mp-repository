@@ -71,10 +71,29 @@ end
 # REGISTER COMMANDS BELOW (Auto-added to /help & API Sync!)
 # ==========================================================
 
-ChangedMP_Commands.register("/help", "/help", "Show all available commands", "player") do |arg|
+ChangedMP_Commands.register("/help", "/help [cmd]", "Show available commands", "player") do |arg|
   allowed = ChangedMP_Commands.all.select { |c| c.fetch(:role) != "admin" || ChangedMP.admin? }
-  names = allowed.map { |c| c.fetch(:usage) }
-  ChangedMP_Commands.reply("Commands (" + names.size.to_s + "): " + names.join(", "))
+  if !arg.empty?
+    q = arg.start_with?("/") ? arg.downcase : ("/" + arg.downcase)
+    found = allowed.find { |c| c.fetch(:name) == q }
+    if found
+      ChangedMP_Commands.reply(found.fetch(:usage) + " - " + found.fetch(:desc))
+    else
+      ChangedMP_Commands.reply("No help found for " + q)
+    end
+  else
+    usages = allowed.map { |c| c.fetch(:usage) }
+    per_line = 4
+    total_pages = (usages.size + per_line - 1) / per_line
+    page = 1
+    idx = 0
+    while idx < usages.size
+      chunk = usages.slice(idx, per_line) || Array.new
+      ChangedMP_Commands.reply("Cmds (" + page.to_s + "/" + total_pages.to_s + "): " + chunk.join(", "))
+      idx += per_line
+      page += 1
+    end
+  end
 end
 
 ChangedMP_Commands.register("/profile", "/profile <user>", "Open player profile card", "player") do |arg|
@@ -102,7 +121,7 @@ ChangedMP_Commands.register("/players", "/players", "List online players in serv
 end
 
 ChangedMP_Commands.register("/rules", "/rules", "Show server rules reminder", "player") do |arg|
-  ChangedMP_Commands.reply("Server Rules: Be respectful, no exploits, follow Discord #rules!")
+  ChangedMP_Commands.reply("Go to Discord to read rules")
 end
 
 ChangedMP_Commands.register("/clear", "/clear", "Clear your overhead chat bubble", "player") do |arg|
