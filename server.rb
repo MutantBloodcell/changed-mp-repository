@@ -484,7 +484,7 @@ end
 
 get "/api/profile" do
   content_type :json
-  target = params["username"].to_s.strip.upcase
+  target = find_user_key(params["username"]).to_s
   halt 400, { error: "Missing username" }.to_json if target.empty?
 
   acc = fb_get("users/#{target}")
@@ -531,7 +531,7 @@ end
 post "/api/profile/bio" do
   content_type :json
   data = JSON.parse(request.body.read) rescue {}
-  u = data["username"].to_s.strip.upcase
+  u = find_user_key(data["username"]).to_s
   halt 403, { error: "Invalid token" }.to_json unless verify_token(u, data["token"])
   bio = data["bio"].to_s.strip[0, 60]
   fb_put("users/#{u}/bio", bio)
