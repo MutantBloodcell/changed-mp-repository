@@ -468,3 +468,59 @@ post "/api/admin/unban" do
   fb_delete("bans/#{target}")
   { "ok" => true, "target" => target }.to_json
 end
+
+get "/api/profile" do
+  content_type :json
+  target = params["username"].to_s.strip.upcase
+  halt 400, { error: "Missing username" }.to_json if target.empty?
+
+  acc = fb_get("users/#{target}")
+  halt 404, { error: "Player not found" }.to_json unless acc.is_a?(Hash)
+
+  role = get_user_role(target)
+  bio  = acc["bio"].to_s.strip
+  bio  = "No bio set yet." if bio.empty?
+  created_ts = acc["created"].to_i
+  joined_str = created_ts > 0 ? Time.at(created_ts).utc.strftime("%Y-%m-%d") : "2026-11-26"
+  friends_cnt = acc["friends"].is_a?(Array) ? acc["friends"].size : (acc["friends"].is_a?(Hash) ? acc["friends"].size : 0)
+
+  online = false
+  cur_lobby = ""
+  cur_map = 0
+  all_p = fb_get("players")
+  if all_p.is_a?(Hash)
+    now = Time.now.to_i
+    all_p.each do |lid, roster|
+      next unless roster.is_a?(Hash)
+      pdata = roster[target]
+      if pdata.is_a?(Hash) && (now - pdata["ts"].to_i) <= 15
+        online = true
+        cur_lobby = lid.to_s
+        cur_map = pdata["map_id"].to_i
+        break
+      end
+    end
+  end
+
+  {
+    "ok"      => true,
+    "username"=> target,
+    "role"    => role,
+    "bio"     => bio,
+    "joined"  => joined_str,
+    "friends" => friends_cnt,
+    "online"  => online,
+    "lobby"   => cur_lobby,
+    "map_id"  => cur_map
+  }.to_json
+end
+
+post "/api/profile/bio" do
+  content_type :json
+  data = JSON.parse(request.body.read) rescue {}
+  u = data["username"].to_s.strip.upcase
+  halt 403, { error: "Invalid token" }.to_json unless verify_token(u, data["token"])
+  bio = data["bio"].to_s.strip[0, 60]
+  fb_patch("users/#{u}", { "bio" => bio })
+  { "ok" => true, "bio" => bio }.to_json
+end
