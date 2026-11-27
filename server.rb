@@ -333,7 +333,7 @@ def ban_payload_json(ban)
 end
 
 def verify_token(uname, tok)
-  u = uname.to_s.upcase.strip
+  u = find_user_key(uname).to_s
   t = tok.to_s.strip
   return false if u.empty? || t.empty?
   acc = fb_get("users/#{u}")
