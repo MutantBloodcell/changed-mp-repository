@@ -556,6 +556,7 @@ post "/api/commands/sync" do
   { "ok" => true, "count" => cmds.size }.to_json
 end
 
+# v1.2.1 - online saves (1795805131)
 get "/api/saves" do
   content_type :json
   uname = find_user_key(params["username"]).to_s
