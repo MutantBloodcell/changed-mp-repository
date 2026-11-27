@@ -555,3 +555,39 @@ post "/api/commands/sync" do
   fb_put("commands", cmds)
   { "ok" => true, "count" => cmds.size }.to_json
 end
+
+get "/api/saves" do
+  content_type :json
+  uname = find_user_key(params["username"]).to_s
+  tok   = params["token"].to_s
+  halt 403, { error: "Invalid token" }.to_json unless verify_token(uname, tok)
+  saves = fb_get("users/#{uname}/saves")
+  saves = {} unless saves.is_a?(Hash)
+  { "ok" => true, "saves" => saves }.to_json
+end
+
+post "/api/saves/save" do
+  content_type :json
+  data  = parse_json_body
+  uname = find_user_key(data["username"]).to_s
+  tok   = data["token"].to_s
+  halt 403, { error: "Invalid token" }.to_json unless verify_token(uname, tok)
+  slot = data["slot"].to_i
+  halt 400, { error: "Invalid slot (1-3)" }.to_json unless [1, 2, 3].include?(slot)
+
+  payload = {
+    "slot"       => slot,
+    "map_id"     => data["map_id"].to_i,
+    "x"          => data["x"].to_i,
+    "y"          => data["y"].to_i,
+    "dir"        => [2, 4, 6, 8].include?(data["dir"].to_i) ? data["dir"].to_i : 2,
+    "gfx"        => filter_text(data["gfx"].to_s).slice(0, 48),
+    "idx"        => data["idx"].to_i,
+    "switches"   => data["switches"].is_a?(Hash) ? data["switches"] : {},
+    "variables"  => data["variables"].is_a?(Hash) ? data["variables"] : {},
+    "saved_at"   => Time.now.strftime("%Y-%m-%d %H:%M")
+  }
+  fb_put("users/#{uname}/saves/slot_#{slot}", payload)
+  { "ok" => true, "slot" => slot, "save" => payload }.to_json
+end
+
