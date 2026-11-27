@@ -15,7 +15,7 @@ BANNED_WORDS   = %w[fuck shit bitch asshole bastard cunt dick pussy nigger nigga
 PLAYER_TIMEOUT = 15
 
 $lobbies = {
-  "global-main-1" => { "id" => "global-main-1", "name" => "Global Main 1", "players" => {} },
+  "global-main-1" => { "id" => "global-rp-1", "name" => "Global RP 1", "players" => {} },
   "global-rp-2"   => { "id" => "global-rp-2",   "name" => "Global RP 2",   "players" => {} }
 }
 $announcement = ""
