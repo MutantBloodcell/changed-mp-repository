@@ -524,3 +524,21 @@ post "/api/profile/bio" do
   fb_put("users/#{u}/bio", bio)
   { "ok" => true, "bio" => bio }.to_json
 end
+
+get "/api/commands" do
+  content_type :json
+  list = fb_get("commands") || []
+  { "ok" => true, "commands" => list }.to_json
+end
+
+post "/api/commands/sync" do
+  content_type :json
+  data = JSON.parse(request.body.read) rescue {}
+  u = data["username"].to_s.strip.upcase
+  halt 403, { error: "Invalid token" }.to_json unless verify_token(u, data["token"])
+  user = fb_get("users/#{u}") || {}
+  halt 403, { error: "Dev/Admin only" }.to_json unless %w[dev admin].include?(user["role"].to_s.downcase)
+  cmds = data["commands"].is_a?(Array) ? data["commands"] : []
+  fb_put("commands", cmds)
+  { "ok" => true, "count" => cmds.size }.to_json
+end
