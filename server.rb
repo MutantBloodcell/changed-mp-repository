@@ -521,6 +521,6 @@ post "/api/profile/bio" do
   u = data["username"].to_s.strip.upcase
   halt 403, { error: "Invalid token" }.to_json unless verify_token(u, data["token"])
   bio = data["bio"].to_s.strip[0, 60]
-  fb_patch("users/#{u}", { "bio" => bio })
+  fb_put("users/#{u}/bio", bio)
   { "ok" => true, "bio" => bio }.to_json
 end
