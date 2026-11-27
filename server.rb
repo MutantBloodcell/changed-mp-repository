@@ -72,6 +72,10 @@ def sanitize_username(str)
   filter_text(str).gsub(/[^a-zA-Z0-9_\-\.]/, "").upcase
 end
 
+def sanitize_display_name(str)
+  filter_text(str).gsub(/[^a-zA-Z0-9_\-\.]/, "")
+end
+
 def dev?(username)
   DEV_USERS.include?(username.to_s.upcase)
 end
@@ -103,7 +107,10 @@ end
 
 post "/api/register" do
   data = parse_json_body
-  username = sanitize_username(data["username"])
+  raw_name = data["username"].to_s
+  username = sanitize_username(raw_name)
+  display_name = sanitize_display_name(raw_name)
+  display_name = username if display_name.empty?
   password = data["password"].to_s
   halt 400, { error: "Username/password required" }.to_json if username.empty? || password.empty?
 
@@ -116,6 +123,7 @@ post "/api/register" do
 
   user_record = {
     "username"   => username,
+    "display_name" => display_name,
     "pass_hash"  => pass_hash,
     "token"      => token,
     "role"       => role,
@@ -124,19 +132,23 @@ post "/api/register" do
   }
 
   fb_put("users/#{username}", user_record)
-  { status: "ok", username: username, token: token, role: role }.to_json
+  { status: "ok", username: username, display_name: display_name, token: token, role: role }.to_json
 end
 
 post "/api/login" do
   data = parse_json_body
-  username = sanitize_username(data["username"])
+  raw_name = data["username"].to_s
+  username = sanitize_username(raw_name)
+  typed_disp = sanitize_display_name(raw_name)
   password = data["password"].to_s
   pass_hash = Digest::SHA256.hexdigest("changed_mp_salt_#{password}")
 
   record = fb_get("users/#{username}")
   if record && record["pass_hash"] == pass_hash
     role = dev?(username) ? "dev" : (record["role"] || "player")
-    { status: "ok", username: username, token: record["token"], role: role }.to_json
+    display_name = !typed_disp.empty? ? typed_disp : (record["display_name"].to_s.empty? ? username : record["display_name"].to_s)
+    fb_patch("users/#{username}", { "display_name" => display_name }) if record["display_name"].to_s != display_name
+    { status: "ok", username: username, display_name: display_name, token: record["token"], role: role }.to_json
   else
     status 401
     { status: "error", error: "Invalid credentials" }.to_json
@@ -151,7 +163,8 @@ post "/api/verify" do
   record = fb_get("users/#{username}")
   if record && record["token"] == token
     role = dev?(username) ? "dev" : (record["role"] || "player")
-    { status: "ok", username: username, role: role }.to_json
+    display_name = record["display_name"].to_s.empty? ? username : record["display_name"].to_s
+    { status: "ok", username: username, display_name: display_name, role: role }.to_json
   else
     status 401
     { status: "invalid" }.to_json
@@ -210,8 +223,12 @@ post "/api/sync" do
   $lobbies[lobby_id] ||= { "id" => lobby_id, "name" => lobby_id, "players" => {} }
   role = dev?(username) ? "dev" : "player"
 
+  raw_disp = sanitize_display_name(data["display_name"].to_s.empty? ? data["user"].to_s : data["display_name"].to_s)
+  raw_disp = username if raw_disp.empty? || raw_disp.upcase != username
+
   $lobbies[lobby_id]["players"][username] = {
     "user"      => username,
+    "display_name" => raw_disp,
     "role"      => role,
     "map"       => data["map"].to_i,
     "x"         => data["x"].to_i,
@@ -226,6 +243,7 @@ post "/api/sync" do
   $lobbies[lobby_id]["players"].values.map do |p|
     {
       "user" => p["user"],
+      "display_name" => (p["display_name"] || p["user"]),
       "role" => p["role"],
       "map"  => p["map"],
       "x"    => p["x"],
