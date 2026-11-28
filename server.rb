@@ -547,7 +547,7 @@ end
 post "/api/commands/sync" do
   content_type :json
   data = JSON.parse(request.body.read) rescue {}
-  u = data["username"].to_s.strip.upcase
+  u = find_user_key(data["username"]).to_s
   halt 403, { error: "Invalid token" }.to_json unless verify_token(u, data["token"])
   user = fb_get("users/#{u}") || {}
   halt 403, { error: "Dev/Admin only" }.to_json unless %w[dev admin].include?(user["role"].to_s.downcase)
