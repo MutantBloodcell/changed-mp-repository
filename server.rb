@@ -124,7 +124,7 @@ post "/api/register" do
 
   pass_hash = Digest::SHA256.hexdigest("changed_mp_salt_#{password}")
   token     = Digest::SHA256.hexdigest("#{username}:#{pass_hash}:#{Time.now.to_i}")
-  role      = dev?(username) ? "dev" : "player"
+  role = system_user?(username) ? "system" : (dev?(username) ? "dev" : "player")
 
   user_record = {
     "username"   => username,
@@ -148,7 +148,7 @@ post "/api/login" do
   user_key = find_user_key(username)
   record = fb_get("users/#{user_key}")
   if record && record["pass_hash"] == pass_hash
-    role = dev?(username) ? "dev" : (record["role"] || "player")
+    role = system_user?(username) ? "system" : (dev?(username) ? "dev" : (record["role"] || "player"))
     { status: "ok", username: (record["username"] || user_key), token: record["token"], role: role }.to_json
   else
     status 401
@@ -164,7 +164,7 @@ post "/api/verify" do
   user_key = find_user_key(username)
   record = fb_get("users/#{user_key}")
   if record && record["token"] == token
-    role = dev?(username) ? "dev" : (record["role"] || "player")
+    role = system_user?(username) ? "system" : (dev?(username) ? "dev" : (record["role"] || "player"))
     { status: "ok", username: (record["username"] || user_key), role: role }.to_json
   else
     status 401
@@ -222,7 +222,7 @@ post "/api/sync" do
   end
 
   $lobbies[lobby_id] ||= { "id" => lobby_id, "name" => lobby_id, "players" => {} }
-  role = dev?(username) ? "dev" : "player"
+  role = system_user?(username) ? "system" : (dev?(username) ? "dev" : "player")
 
   $lobbies[lobby_id]["players"][username.upcase] = {
     "user"      => username,
