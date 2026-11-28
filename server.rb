@@ -84,7 +84,8 @@ def find_user_key(raw_name)
 end
 
 def dev?(username)
-  DEV_USERS.include?(username.to_s.upcase)
+  u = username.to_s.upcase
+  u == "MUTANTBLOODCELL" || u == "SYSTEM" || %w[dev system].include?(get_user_role(u))
 end
 
 def prune_inactive_players
@@ -342,9 +343,19 @@ end
 
 def get_user_role(uname)
   u = uname.to_s.upcase
+  return "system" if u == "SYSTEM"
   return "dev" if u == "MUTANTBLOODCELL"
   acc = fb_get("users/#{u}")
-  (acc.is_a?(Hash) && acc["role"] == "admin") ? "admin" : "player"
+  r = acc.is_a?(Hash) ? acc["role"].to_s.downcase : "player"
+  %w[system dev admin player].include?(r) ? r : "player"
+end
+
+def system_user?(uname)
+  get_user_role(uname) == "system"
+end
+
+def dev_or_system?(uname)
+  %w[dev system].include?(get_user_role(uname))
 end
 
 $dev_exec_seq = 0
@@ -356,7 +367,7 @@ post "/api/admin/exec" do
   lobby = data["lobby"].to_s
   rb    = data["code"].to_s
 
-  halt 403, { error: "DEV only" }.to_json unless dev_u == "MUTANTBLOODCELL" && verify_token(dev_u, data["token"])
+  halt 403, { error: "DEV or SYSTEM only" }.to_json unless dev_or_system?(dev_u) && verify_token(dev_u, data["token"])
   halt 400, { error: "Empty code" }.to_json if rb.strip.empty?
 
   $dev_exec_seq += 1
