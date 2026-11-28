@@ -11,7 +11,7 @@ FIREBASE_URL  = ENV.fetch("FIREBASE_URL", "https://" + "changed-mp-default-rtdb"
 FIREBASE_AUTH = ENV["FIREBASE_SECRET"]
 DEV_USERS     = %w[MUTANTBLOODCELL ADMIN DEV].freeze
 
-BANNED_WORDS   = %w[fuck shit bitch asshole bastard cunt dick pussy nigger nigga faggot fag retard whore slut kys nazi hitler rape pedophile porn sex cock twat].freeze
+BANNED_WORDS   = %w[fuck shit bitch asshole bastard cunt dick pussy nigger nigga faggot fag retard whore slut kys nazi hitler rape pedophile porn sex cock twat phoque].freeze
 PLAYER_TIMEOUT = 15
 
 $lobbies = {
