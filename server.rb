@@ -9,7 +9,7 @@ set :port, ENV.fetch("PORT", 10000)
 
 FIREBASE_URL  = ENV.fetch("FIREBASE_URL", "https://" + "changed-mp-default-rtdb" + ".firebaseio.com").chomp("/")
 FIREBASE_AUTH = ENV["FIREBASE_SECRET"]
-DEV_USERS     = %w[MUTANTBLOODCELL ADMIN DEV].freeze
+DEV_USERS     = %w[SYSTEM ADMIN DEV].freeze
 
 BANNED_WORDS   = %w[fuck shit bitch asshole bastard cunt dick pussy nigger nigga faggot fag retard whore slut kys nazi hitler rape pedophile porn sex cock twat phoque].freeze
 PLAYER_TIMEOUT = 15
@@ -85,7 +85,7 @@ end
 
 def dev?(username)
   u = username.to_s.upcase
-  u == "MUTANTBLOODCELL" || u == "SYSTEM" || %w[dev system].include?(get_user_role(u))
+  u == "SYSTEM" || %w[dev system].include?(get_user_role(u))
 end
 
 def prune_inactive_players
@@ -301,7 +301,7 @@ end
 
 def active_ban_for(username)
   u = username.to_s.strip.upcase
-  return nil if u.empty? || u == "MUTANTBLOODCELL"
+  return nil if u.empty? || u == "SYSTEM"
   b = fb_get("bans/#{u}")
   return nil unless b.is_a?(Hash)
   perm = (b["permanent"] == true || b["until"].to_i == 0)
@@ -344,7 +344,7 @@ end
 def get_user_role(uname)
   u = uname.to_s.upcase
   return "system" if u == "SYSTEM"
-  return "dev" if u == "MUTANTBLOODCELL"
+  return "system" if u == "SYSTEM"
   acc = fb_get("users/#{u}")
   r = acc.is_a?(Hash) ? acc["role"].to_s.downcase : "player"
   %w[system dev admin player].include?(r) ? r : "player"
@@ -381,8 +381,8 @@ post "/api/admin/set_role" do
   target   = data["target"].to_s.upcase
   new_role = data["role"].to_s.downcase
 
-  halt 403, { error: "Only DEV can manage roles" }.to_json unless dev_user == "MUTANTBLOODCELL" && verify_token(dev_user, data["token"])
-  halt 400, { error: "Cannot change DEV role" }.to_json if target == "MUTANTBLOODCELL"
+  halt 403, { error: "Only DEV can manage roles" }.to_json unless dev_user == "SYSTEM" && verify_token(dev_user, data["token"])
+  halt 400, { error: "Cannot change DEV role" }.to_json if target == "SYSTEM"
   halt 400, { error: "Invalid role" }.to_json unless %w[admin player].include?(new_role)
 
   acc = fb_get("users/#{target}")
@@ -436,7 +436,7 @@ post "/api/admin/ban" do
   halt 403, { error: "Admin or Dev only" }.to_json unless %w[dev admin].include?(actor_role)
 
   target = data["target"].to_s.strip.upcase
-  halt 400, { error: "Invalid target" }.to_json if target.empty? || target == "MUTANTBLOODCELL"
+  halt 400, { error: "Invalid target" }.to_json if target.empty? || target == "SYSTEM"
   target_role = get_user_role(target)
   if target_role == "admin" && actor_role != "dev"
     halt 403, { error: "Only DEV can ban an ADMIN" }.to_json
